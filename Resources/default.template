@@ -1,0 +1,10 @@
+Interface: {{ interface }}
+{% for net in nets %}
+Network
+    BSSID: {{ net.bssid }}
+    SSID: {{ net.ssid }}
+    Channal: {{ net.channelNumber }}
+    Signal: {{ net.rssi​Value }} dBm
+    Noise: {{ net.noiseMeasurement }} dBm
+{% endfor %}
+Networks: {{ count }}
