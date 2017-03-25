@@ -18,13 +18,7 @@ func findInterface(name: String) throws -> CWInterface {
     return interface
 }
 
-func findNetworks(interface: CWInterface, predicate: (CWNetwork) -> Bool) throws -> [CWNetwork] {
-    return try interface.scanForNetworks(withName: nil).filter(predicate)
-}
-
 func setNetwork(interface: CWInterface, network: CWNetwork) throws -> Void {
-    print("Switching \(interface.interfaceName) to \(network.bssid!) (SSID: \(network.ssid ?? "N/A"))")
-
     let password = try network.ssid.flatMap{ try findWifiPassword(networkName: $0) }
 
     try interface.associate(to: network, password: password)
@@ -65,16 +59,50 @@ func findWifiPassword(networkName: String) throws -> String? {
     }
 }
 
+func defaultInterfaceName() -> String? {
+    return CWWiFiClient.interfaceNames()?.first
+}
+
+func interfaceNameValidator(name: String?) throws -> String? {
+    return try findInterface(name: name!).interfaceName
+}
+
+func printNetworkList(interface: CWInterface, networks: [CWNetwork], template: String) throws -> Void {
+    let networksProperties = networks.map {[
+            "bssid": $0.bssid ?? "N/A",
+            "ssid": $0.ssid ?? "N/A",
+            "rssi​Value": $0.rssiValue,
+            "noiseMeasurement": $0.noiseMeasurement,
+            "channelNumber": $0.wlanChannel.channelNumber
+    ]}
+    let env = Environment(loader: FileSystemLoader(paths: ["Resources/"]))
+    let output = try env.renderTemplate(
+            name: template,
+            context: [
+                    "interface": interface,
+                    "nets": networksProperties,
+                    "count": networks.count
+            ])
+
+    print(output)
+}
 
 let main = Group {
-    $0.command("list",
-            Argument<String>("interface", description: "Network interface"),
-            Option<String>("ssid", "", description: "Filter by ssid"),
-            description: "List available wireless networks") { (interfaceName, ssid) in
+    $0.command("scan",
+            Option<String>("interface", default: defaultInterfaceName()!, description: "Network interface", validator: interfaceNameValidator),
+            Option<String>("ssid", description: "Filter by ssid"),
+            Flag("no-cache", description: "Do a full network scan", default: false),
+            description: "List available wireless networks") { (interfaceName, ssid, nocache) in
 
-        let ssidRegex = ssid != "" ? try Regex(string: ssid) : nil
-        let interface = try findInterface(name: interfaceName)
-        let networks = try findNetworks(interface: interface, predicate: { network in
+        let interface = try findInterface(name: interfaceName!)
+
+        if (nocache!) {
+            print("Scanning \(interface.interfaceName!)...")
+        }
+
+        let ssidRegex = try ssid.map { try Regex(string: $0) }
+        let networks = (nocache! ? try interface.scanForNetworks(withName: nil) : interface.cachedScanResults()) ?? []
+        let filteredNetworks = networks.filter{ network in
             if let regex = ssidRegex {
                 if let name = network.ssid {
                     return regex.matches(name)
@@ -84,36 +112,27 @@ let main = Group {
             } else {
                 return true
             }
-        }).map {[
-            "bssid": $0.bssid ?? "N/A",
-            "ssid": $0.ssid ?? "N/A",
-            "rssi​Value": $0.rssiValue,
-            "noiseMeasurement": $0.noiseMeasurement,
-            "channelNumber": $0.wlanChannel.channelNumber
-        ]}
+        }
 
-        let env = Environment(loader: FileSystemLoader(paths: ["Resources/"]))
-        let output = try env.renderTemplate(
-                name: "default.template",
-                context: [
-                        "interface": interface,
-                        "nets": Array(networks),
-                        "count": networks.count
-                ])
-
-        print(output)
+        try printNetworkList(interface: interface, networks: filteredNetworks, template: "default.template")
     }
 
     $0.command("join",
-            Argument<String>("interface", description: "Network interface"),
-            Option<String>("bssid", "", description: "BSSID of the network"),
-            description: "Join network") { (interfaceName, bssid) in
+            Option<String>("interface", default: defaultInterfaceName()!, description: "Network interface", validator: interfaceNameValidator),
+            Option<String>("bssid", description: "BSSID of the network to join"),
+            description: "Join a network"
+    ) { interfaceName, bssid in
 
-        let interface = try findInterface(name: interfaceName)
-        let network = try findNetworks(interface: interface, predicate: { $0.bssid == bssid }).first
+        if bssid == nil {
+            throw AeroportError.RuntimeError(message: "Missing network name")
+        }
 
-        if network != nil {
-            try setNetwork(interface: interface, network: network!)
+        let interface = try findInterface(name: interfaceName!)
+
+        if let network = try interface.scanForNetworks(withName: nil).filter({ $0.bssid == bssid }).first {
+            print("Switching \(interface.interfaceName!) to \(network.bssid!) (SSID: \(network.ssid ?? "N/A"))")
+
+            try setNetwork(interface: interface, network: network)
         } else {
             throw AeroportError.RuntimeError(message: "\(bssid): Unknown network")
         }
